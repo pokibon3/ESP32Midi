@@ -1,0 +1,6 @@
+.pio/
+.vscode/
+soundfont/*.sf2
+tools/midiplay/midiplay
+.DS_Store
+.claude/
