@@ -50,6 +50,16 @@ tools/midiplay/midiplay -d "IAC" x.mid  # 出力先を指定
 
 再生前に GM System On を送り、Ctrl-C で止めると全チャンネルの発音を止めます。
 
+### デモ曲
+
+`tools/demo/make_orchestra.py` は 16ch 全部を使うオーケストラ風のデモ曲(約87秒)を生成します。
+TimGM6mb ではほぼ全編で 120〜128 音を使い、CPU 負荷は最大約80%でした。
+
+```sh
+python3 tools/demo/make_orchestra.py /tmp/orchestra.mid
+tools/midiplay/midiplay /tmp/orchestra.mid
+```
+
 ## デバッグ
 
 `pio run -e debug -t upload` は USB を内蔵 USB-Serial-JTAG にしたビルドです(USB-MIDI なし)。
