@@ -100,3 +100,20 @@ CPU 負荷 約66〜71%、処理落ちなしでした(エフェクトなしの 12
 | `src/midi_in.*` | USB-MIDI / UART MIDI の受信とパース |
 | `src/display.*` | LovyanGFX による状態表示 |
 | `scripts/upload_sf2.py` | `uploadsf2` ターゲット |
+
+## ライセンス
+
+このリポジトリのソースコードは [MIT License](LICENSE) です。
+
+外部のコンポーネントはそれぞれのライセンスに従います。
+
+| コンポーネント | ライセンス | 備考 |
+|---|---|---|
+| Arduino-ESP32 | LGPL-2.1 | ビルド時に取得。ファームウェアのバイナリを配布する場合は LGPL の条件に注意 |
+| LovyanGFX | FreeBSD | ビルド時に取得 |
+| TinyUSB | MIT | Arduino-ESP32 に同梱 |
+| Freeverb(`src/effects.cpp` のリバーブ) | パブリックドメイン | Jezar at Dreampoint |
+| ES8156 初期化シーケンス | — | Espressif esp_codec_dev(Apache-2.0)のレジスタ設定を参照 |
+| SoundFont | 各 SoundFont のライセンス | リポジトリには含まない。例: TimGM6mb は GPLv2。書き込み済みの機器を配布する場合は SoundFont のライセンスに従うこと |
+
+USB の VID/PID は Espressif のもの(303A:1001)を使っています。製品として配布する場合は独自の PID を取得してください。
