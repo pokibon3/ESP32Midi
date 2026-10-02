@@ -13,7 +13,8 @@ ESP32-S3-BOX-Lite を USB-MIDI 音源にするファームウェアです。既�
 - MIDI: Note On/Off、Program Change、Bank Select、Pitch Bend(RPN 0 でレンジ変更可)、
   CC1/7/10/11/64/91/93/120/121/123、GM/GS/XG リセット SysEx。10ch はドラム(bank 128)
 - 入力: USB-MIDI(本体の USB-C)、UART MIDI(`MIDI_UART_RX_PIN` で有効化)
-- 画面: 16ch のプリセット名とノートアクティビティ、発音数、CPU負荷
+- 画面: 16ch のプリセット名と LED 風レベルメーター、発音数・CPU 負荷バー、音量スライダー
+- 出力遅延: I2S DMA バッファ 3 × 128 フレーム(32kHz で 12ms。`AUDIO_DMA_DESC` / `AUDIO_DMA_FRAMES`)
 - ボタン: PREV = 音量−、NEXT = 音量＋、ENTER = GMリセット
 
 ## 使い方
@@ -82,7 +83,8 @@ tools/midiplay/midiplay /tmp/orchestra.mid
 CPU 負荷 約66〜71%、処理落ちなしでした(エフェクトなしの 128 音では約62%)。
 異なるサンプルが大量に同時に鳴るほどフラッシュ読み出しのキャッシュミスで負荷が上がります。
 
-画面の `CPU` が 100% に近づくか `XRUN` が増える場合は、`platformio.ini` で調整してください。
+画面の `CPU` が 100% に近づくか、シリアルログの `xrun`(DMA アンダーラン = 音切れ)が増える場合は、
+`platformio.ini` で調整してください。
 
 - `-DSYNTH_SAMPLE_RATE=22050` (負荷が約30%減)
 - `-DSYNTH_MAX_VOICES=96`

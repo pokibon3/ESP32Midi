@@ -6,9 +6,26 @@
 
 #include "board.h"
 
+// DMA buffering = AUDIO_DMA_DESC x AUDIO_DMA_FRAMES frames (latency vs. dropout margin)
+#ifndef AUDIO_DMA_DESC
+#define AUDIO_DMA_DESC 3
+#endif
+#ifndef AUDIO_DMA_FRAMES
+#define AUDIO_DMA_FRAMES 128
+#endif
+
 namespace audio_out {
 
 static i2s_chan_handle_t s_tx;
+static volatile uint32_t s_underruns;
+
+static bool IRAM_ATTR onSendQueueOverflow(i2s_chan_handle_t, i2s_event_data_t*, void*) {
+  s_underruns++;
+  return false;
+}
+
+uint32_t underruns() { return s_underruns; }
+uint32_t bufferFrames() { return AUDIO_DMA_DESC * AUDIO_DMA_FRAMES; }
 
 static bool es8156Write(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(ES8156_ADDR);
@@ -38,8 +55,8 @@ bool begin(uint32_t sampleRate) {
   digitalWrite(PA_EN_PIN, LOW);
 
   i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chanCfg.dma_desc_num = 4;
-  chanCfg.dma_frame_num = 256;
+  chanCfg.dma_desc_num = AUDIO_DMA_DESC;
+  chanCfg.dma_frame_num = AUDIO_DMA_FRAMES;
   chanCfg.auto_clear = true;
   if (i2s_new_channel(&chanCfg, &s_tx, nullptr) != ESP_OK) return false;
 
@@ -58,6 +75,9 @@ bool begin(uint32_t sampleRate) {
   };
   stdCfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
   if (i2s_channel_init_std_mode(s_tx, &stdCfg) != ESP_OK) return false;
+  i2s_event_callbacks_t cbs = {};
+  cbs.on_send_q_ovf = onSendQueueOverflow;
+  i2s_channel_register_event_callback(s_tx, &cbs, nullptr);
   if (i2s_channel_enable(s_tx) != ESP_OK) return false;
 
   // MCLK must be running before the codec is configured

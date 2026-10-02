@@ -708,7 +708,8 @@ void audioTask(void*) {
 
     float l = elapsed / blockUs;
     load = load * 0.98f + l * 0.02f;
-    if (l > 1.0f) g_stats.underruns++;
+    if (l > 1.0f) g_stats.lateBlocks++;
+    g_stats.underruns = audio_out::underruns();
     g_stats.cpuLoad = load;
     g_stats.activeVoices = active;
     if (active > g_stats.peakVoices) g_stats.peakVoices = active;

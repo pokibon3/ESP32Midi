@@ -18,7 +18,8 @@ struct Stats {
   uint16_t activeVoices;
   uint16_t peakVoices;
   float cpuLoad;       // render time / real time (0..1)
-  uint32_t underruns;  // blocks that took longer than real time
+  uint32_t lateBlocks;  // blocks that took longer than real time to render
+  uint32_t underruns;   // DMA underruns (audible dropouts)
   uint8_t program[16];
   bool drum[16];
   uint8_t activity[16];  // last note-on velocity, decayed by the UI

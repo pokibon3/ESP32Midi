@@ -85,8 +85,8 @@ void loop() {
     lastLog = now;
     const synth::Stats& st = synth::stats();
     if (st.activeVoices) {
-      Serial.printf("voices %u (peak %u) cpu %d%% xrun %lu\n", st.activeVoices, st.peakVoices,
-                    (int)(st.cpuLoad * 100), (unsigned long)st.underruns);
+      Serial.printf("voices %u (peak %u) cpu %d%% late %lu xrun %lu\n", st.activeVoices, st.peakVoices,
+                    (int)(st.cpuLoad * 100), (unsigned long)st.lateBlocks, (unsigned long)st.underruns);
     }
   }
   delay(1);
