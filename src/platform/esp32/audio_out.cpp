@@ -5,6 +5,7 @@
 #include <driver/i2s_std.h>
 
 #include "board.h"
+#include "platform.h"
 
 // DMA buffering = AUDIO_DMA_DESC x AUDIO_DMA_FRAMES frames (latency vs. dropout margin)
 #ifndef AUDIO_DMA_DESC
@@ -27,6 +28,7 @@ static bool IRAM_ATTR onSendQueueOverflow(i2s_chan_handle_t, i2s_event_data_t*, 
 uint32_t underruns() { return s_underruns; }
 uint32_t bufferFrames() { return AUDIO_DMA_DESC * AUDIO_DMA_FRAMES; }
 
+#if HAS_ES8156
 static bool es8156Write(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(ES8156_ADDR);
   Wire.write(reg);
@@ -49,10 +51,15 @@ static bool es8156Init() {
 }
 
 void setVolume(uint8_t v) { es8156Write(0x14, v); }
+#else
+void setVolume(uint8_t) {}  // PCM5102A has no volume control
+#endif
 
 bool begin(uint32_t sampleRate) {
+#if HAS_ES8156
   pinMode(PA_EN_PIN, OUTPUT);
   digitalWrite(PA_EN_PIN, LOW);
+#endif
 
   i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chanCfg.dma_desc_num = AUDIO_DMA_DESC;
@@ -80,11 +87,13 @@ bool begin(uint32_t sampleRate) {
   i2s_channel_register_event_callback(s_tx, &cbs, nullptr);
   if (i2s_channel_enable(s_tx) != ESP_OK) return false;
 
+#if HAS_ES8156
   // MCLK must be running before the codec is configured
   Wire.begin(CODEC_I2C_SDA, CODEC_I2C_SCL, 400000);
   if (!es8156Init()) return false;
 
   digitalWrite(PA_EN_PIN, HIGH);
+#endif
   return true;
 }
 

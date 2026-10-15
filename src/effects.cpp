@@ -3,13 +3,13 @@
 #include <Arduino.h>
 #include <math.h>
 
+#include "platform.h"
+
 namespace effects {
 
 namespace {
 
-float* allocBuffer(int n) {
-  return (float*)heap_caps_calloc(n, sizeof(float), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-}
+float* allocBuffer(int n) { return (float*)platform::allocFast(n * sizeof(float)); }
 
 }  // namespace
 
@@ -52,7 +52,7 @@ void Reverb::setDamping(float v) {
   damp2_ = 1.0f - damp1_;
 }
 
-void Reverb::process(const float* in, float* out, int n, float level) {
+AUDIO_HOT void Reverb::process(const float* in, float* out, int n, float level) {
   constexpr float kFixedGain = 0.015f;
   constexpr int kMaxBlock = 256;
   float x[kMaxBlock], acc[kMaxBlock];
@@ -109,7 +109,7 @@ bool Chorus::begin(float sampleRate) {
   return true;
 }
 
-void Chorus::process(const float* in, float* out, int n, float level) {
+AUDIO_HOT void Chorus::process(const float* in, float* out, int n, float level) {
   constexpr int MASK = BUF_SIZE - 1;
   // LFO is evaluated at block boundaries and interpolated inside the block
   float p0 = phase_, p1 = phase_ + phaseInc_ * n;

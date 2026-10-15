@@ -1,11 +1,13 @@
 #include "display.h"
 
+#include "board.h"
+
+#if HAS_DISPLAY
+
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
-
 #include <math.h>
 
-#include "board.h"
 #include "synth.h"
 
 namespace display {
@@ -294,3 +296,14 @@ void update(float masterGain) {
 }
 
 }  // namespace display
+
+#else  // !HAS_DISPLAY
+
+namespace display {
+void begin() {}
+void showError(const char*, const char*) {}
+void showHeader(const char*, uint32_t, uint32_t) {}
+void update(float) {}
+}  // namespace display
+
+#endif

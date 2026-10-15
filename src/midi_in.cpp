@@ -1,17 +1,41 @@
 #include "midi_in.h"
 
 #include <Arduino.h>
-#if !ARDUINO_USB_MODE
+#include <string.h>
+#ifndef MIDI_USB_ENABLE
+#define MIDI_USB_ENABLE 1
+#endif
+#if !MIDI_USB_ENABLE
+#define HAVE_USB_MIDI 0
+#elif defined(ARDUINO_ARCH_RP2040)
+// Adafruit TinyUSB stack (-DUSE_TINYUSB): with the core's own USB stack, adding
+// the MIDIUSB interface after boot left both CDC and MIDI without data.
+#include <Adafruit_TinyUSB.h>
+#define HAVE_USB_MIDI 1
+#elif !ARDUINO_USB_MODE
 #include <USB.h>
 #include <USBMIDI.h>
 #define HAVE_USB_MIDI 1
 #endif
 
+#include "platform.h"
 #include "synth.h"
 
 namespace midi_in {
 
 namespace {
+
+// F0 7D 'B' 'O' 'O' 'T' F7 (non-commercial ID): reboot into the bootloader.
+// Used by `pio run -t uploadsf2` when the 1200bps touch does not work.
+const uint8_t kBootSysex[] = {0xF0, 0x7D, 'B', 'O', 'O', 'T', 0xF7};
+
+void handleSysex(const uint8_t* d, size_t len) {
+  if (len == sizeof(kBootSysex) && memcmp(d, kBootSysex, len) == 0) {
+    platform::rebootToBootloader();
+    return;
+  }
+  synth::sysex(d, len);
+}
 
 // Byte stream parser with running status and SysEx support
 class Parser {
@@ -29,7 +53,7 @@ class Parser {
         pushSysex(b);
         if (b == 0xF7) {
           inSysex_ = false;
-          if (sysexLen_ <= sizeof(sysex_)) synth::sysex(sysex_, sysexLen_);
+          if (sysexLen_ <= sizeof(sysex_)) handleSysex(sysex_, sysexLen_);
         }
         return;
       }
@@ -68,7 +92,10 @@ class Parser {
   size_t sysexLen_ = 0;
 };
 
-#if HAVE_USB_MIDI
+#if HAVE_USB_MIDI && defined(ARDUINO_ARCH_RP2040)
+Adafruit_USBD_MIDI usbMidi;
+Parser usbParser;
+#elif HAVE_USB_MIDI
 USBMIDI usbMidi("ESP32-S3 GM Synth");
 Parser usbParser;
 #endif
@@ -83,16 +110,41 @@ const uint8_t kCinLength[16] = {0, 0, 2, 3, 3, 1, 2, 3, 3, 3, 3, 3, 2, 2, 3, 1};
 }  // namespace
 
 void begin() {
+#if HAVE_USB_MIDI && defined(ARDUINO_ARCH_RP2040)
+  usbMidi.setStringDescriptor("RP2350 GM Synth");
+#endif
 #if HAVE_USB_MIDI
   usbMidi.begin();
 #endif
+#if HAVE_USB_MIDI && defined(ARDUINO_ARCH_RP2040)
+  // The MIDI interface only appears after re-enumeration
+  if (TinyUSBDevice.mounted()) {
+    TinyUSBDevice.detach();
+    delay(10);
+    TinyUSBDevice.attach();
+  }
+#endif
 #if MIDI_UART_RX_PIN >= 0
+#if defined(ARDUINO_ARCH_RP2040)
+  Serial1.setRX(MIDI_UART_RX_PIN);
+  Serial1.begin(31250);
+#else
   Serial1.begin(31250, SERIAL_8N1, MIDI_UART_RX_PIN, -1);
+#endif
 #endif
 }
 
 void poll() {
-#if HAVE_USB_MIDI
+#if HAVE_USB_MIDI && defined(ARDUINO_ARCH_RP2040)
+#ifdef TINYUSB_NEED_POLLING_TASK
+  TinyUSBDevice.task();
+#endif
+  uint8_t pkt[4];
+  while (usbMidi.readPacket(pkt)) {
+    uint8_t n = kCinLength[pkt[0] & 0x0F];
+    for (uint8_t i = 0; i < n; i++) usbParser.feed(pkt[1 + i]);
+  }
+#elif HAVE_USB_MIDI
   midiEventPacket_t pkt;
   while (usbMidi.readPacket(&pkt)) {
     uint8_t n = kCinLength[pkt.header & 0x0F];

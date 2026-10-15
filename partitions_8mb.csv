@@ -1,0 +1,5 @@
+# 8MB flash (XIAO ESP32S3)
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000
+factory,  app,  factory, 0x10000,  0x180000
+sf2,      data, 0x40,    0x190000, 0x670000

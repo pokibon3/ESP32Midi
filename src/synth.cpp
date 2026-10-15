@@ -1,14 +1,14 @@
 #include "synth.h"
 
 #include <Arduino.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
-#include <freertos/task.h>
 #include <math.h>
 #include <string.h>
 
+#include <atomic>
+
 #include "audio_out.h"
 #include "effects.h"
+#include "platform.h"
 
 namespace synth {
 
@@ -17,7 +17,11 @@ using namespace sf2;
 namespace {
 
 constexpr int BLOCK = 64;  // frames per control/render block
-constexpr int NUM_VOICES = SYNTH_MAX_VOICES;
+constexpr int NUM_VOICES = SYNTH_MAX_VOICES;  // polyphony limit
+// Extra slots where stolen voices fade out (VolEnv::kill, 5ms) instead of
+// being cut off, which clicks when the polyphony limit is reached.
+constexpr int FADE_VOICES = 16;
+constexpr int TOTAL_VOICES = NUM_VOICES + FADE_VOICES;
 constexpr int DRUM_CHANNEL = 9;
 constexpr float SILENCE_DB = 96.0f;
 
@@ -194,6 +198,7 @@ struct Channel {
 
 struct Voice {
   bool active;
+  bool killed;     // fast fade-out; no longer counts against the polyphony limit
   bool released;   // note-off received (or pedal released)
   bool sustained;  // note-off received while sustain pedal held
   uint8_t ch, key, vel;
@@ -233,15 +238,34 @@ const SoundFont* g_sf;
 float g_fs;
 float g_dt;  // block duration
 float g_master = 0.35f;
+float g_masterVolume = 1.0f;  // GM Master Volume SysEx
 Channel g_ch[16];
 Voice* g_voices;
 uint32_t g_ageCounter;
 Stats g_stats;
+bool g_started;
 
-QueueHandle_t g_events;
-TaskHandle_t g_audioTask, g_workerTask;
+// MIDI events: single producer (main loop) -> single consumer (audio core)
+constexpr uint32_t EVENT_QUEUE = 512;  // power of two
+Event g_events[EVENT_QUEUE];
+std::atomic<uint32_t> g_eventHead{0}, g_eventTail{0};
 
-constexpr int SPLIT = NUM_VOICES / 2;
+void pushEvent(const Event& e) {
+  uint32_t head = g_eventHead.load(std::memory_order_relaxed);
+  if (head - g_eventTail.load(std::memory_order_acquire) >= EVENT_QUEUE) return;  // full: drop
+  g_events[head & (EVENT_QUEUE - 1)] = e;
+  g_eventHead.store(head + 1, std::memory_order_release);
+}
+
+bool popEvent(Event& e) {
+  uint32_t tail = g_eventTail.load(std::memory_order_relaxed);
+  if (tail == g_eventHead.load(std::memory_order_acquire)) return false;
+  e = g_events[tail & (EVENT_QUEUE - 1)];
+  g_eventTail.store(tail + 1, std::memory_order_release);
+  return true;
+}
+
+constexpr int SPLIT = TOTAL_VOICES / 2;
 int16_t g_out[BLOCK * 2];
 
 // ---------------------------------------------------------------------------
@@ -300,37 +324,47 @@ void releaseVoice(Voice& v) {
   v.mod.noteOff();
 }
 
+void killVoice(Voice& v) {
+  v.killed = true;
+  v.vol.kill();
+}
+
 Voice* allocVoice() {
-  // Voices [0, SPLIT) render on core 1, [SPLIT, NUM_VOICES) on core 0.
+  // Voices [0, SPLIT) render on core 1, [SPLIT, TOTAL_VOICES) on core 0.
   // Pick a free voice from the less loaded half to keep both cores busy.
-  int activeA = 0, activeB = 0;
+  int activeA = 0, activeB = 0, sounding = 0;
   Voice* freeA = nullptr;
   Voice* freeB = nullptr;
-  for (int i = 0; i < NUM_VOICES; i++) {
+  for (int i = 0; i < TOTAL_VOICES; i++) {
     Voice& v = g_voices[i];
     if (v.active) {
       (i < SPLIT ? activeA : activeB)++;
+      if (!v.killed) sounding++;
     } else if (i < SPLIT) {
       if (!freeA) freeA = &v;
     } else if (!freeB) {
       freeB = &v;
     }
   }
-  if (freeA && freeB) return activeA <= activeB ? freeA : freeB;
-  if (freeA || freeB) return freeA ? freeA : freeB;
+  Voice* freeVoice = freeA && freeB ? (activeA <= activeB ? freeA : freeB) : freeA ? freeA : freeB;
+  if (freeVoice && sounding < NUM_VOICES) return freeVoice;
 
+  // At the limit: fade out the best victim, preferring released & quiet voices,
+  // then the oldest ones.
   Voice* best = nullptr;
   float bestScore = 1e30f;
-  for (int i = 0; i < NUM_VOICES; i++) {
+  for (int i = 0; i < TOTAL_VOICES; i++) {
     Voice& v = g_voices[i];
-    // Prefer stealing released & quiet voices, then the oldest ones.
+    if (!v.active || v.killed) continue;
     float score = (v.released ? 0.0f : 2.0f) + v.vol.gain() + (g_ageCounter - v.age) * -1e-7f;
     if (score < bestScore) {
       bestScore = score;
       best = &v;
     }
   }
-  return best;
+  if (!freeVoice) return best;  // no fade slot left: cut the victim off
+  if (best) killVoice(*best);
+  return freeVoice;
 }
 
 void startVoice(Voice& v, uint8_t ch, uint8_t key, uint8_t vel, const Region& r) {
@@ -339,6 +373,7 @@ void startVoice(Voice& v, uint8_t ch, uint8_t key, uint8_t vel, const Region& r)
   int vv = g[velocity] >= 0 ? g[velocity] : vel;
 
   v.active = true;
+  v.killed = false;
   v.released = false;
   v.sustained = false;
   v.ch = ch;
@@ -401,7 +436,7 @@ void startVoice(Voice& v, uint8_t ch, uint8_t key, uint8_t vel, const Region& r)
 
 void noteOff(uint8_t ch, uint8_t key) {
   Channel& c = g_ch[ch];
-  for (int i = 0; i < NUM_VOICES; i++) {
+  for (int i = 0; i < TOTAL_VOICES; i++) {
     Voice& v = g_voices[i];
     if (!v.active || v.released || v.ch != ch || v.key != key) continue;
     if (c.sustain) {
@@ -429,10 +464,10 @@ void noteOn(uint8_t ch, uint8_t key, uint8_t vel) {
     if (key < r.loKey || key > r.hiKey || vel < r.loVel || vel > r.hiVel) continue;
     uint8_t ex = (uint8_t)r.gen[exclusiveClass];
     if (ex) {
-      for (int j = 0; j < NUM_VOICES; j++) {
+      for (int j = 0; j < TOTAL_VOICES; j++) {
         Voice& o = g_voices[j];
         if (o.active && o.ch == ch && o.exclusiveClass == ex && (int32_t)(o.age - ageBefore) <= 0) {
-          o.vol.kill();
+          killVoice(o);
         }
       }
     }
@@ -442,16 +477,16 @@ void noteOn(uint8_t ch, uint8_t key, uint8_t vel) {
 }
 
 void allNotesOff(uint8_t ch) {
-  for (int i = 0; i < NUM_VOICES; i++) {
+  for (int i = 0; i < TOTAL_VOICES; i++) {
     Voice& v = g_voices[i];
     if (v.active && v.ch == ch && !v.released) releaseVoice(v);
   }
 }
 
 void allSoundOff(uint8_t ch) {
-  for (int i = 0; i < NUM_VOICES; i++) {
+  for (int i = 0; i < TOTAL_VOICES; i++) {
     Voice& v = g_voices[i];
-    if (v.active && v.ch == ch) v.vol.kill();
+    if (v.active && v.ch == ch) killVoice(v);
   }
 }
 
@@ -474,7 +509,7 @@ void controlChange(uint8_t ch, uint8_t cc, uint8_t val) {
     case 64: {
       bool on = val >= 64;
       if (c.sustain && !on) {
-        for (int i = 0; i < NUM_VOICES; i++) {
+        for (int i = 0; i < TOTAL_VOICES; i++) {
           Voice& v = g_voices[i];
           if (v.active && v.ch == ch && v.sustained) releaseVoice(v);
         }
@@ -496,8 +531,8 @@ constexpr uint8_t EV_RESET = 0xFF;
 
 void handleEvent(const Event& e) {
   if (e.status == EV_RESET) {
-    for (int i = 0; i < NUM_VOICES; i++) {
-      if (g_voices[i].active) g_voices[i].vol.kill();
+    for (int i = 0; i < TOTAL_VOICES; i++) {
+      if (g_voices[i].active) killVoice(g_voices[i]);
     }
     for (int i = 0; i < 16; i++) resetChannel(i);
     return;
@@ -524,7 +559,7 @@ void handleEvent(const Event& e) {
 // Rendering
 
 // Per-block control update. Returns false when the voice has finished.
-bool updateVoiceControl(Voice& v, uint64_t& inc, float& amp) {
+AUDIO_HOT bool updateVoiceControl(Voice& v, uint64_t& inc, float& amp) {
   v.vol.process(g_dt);
   if (v.vol.stage == DONE) return false;
   v.mod.process(g_dt);
@@ -585,7 +620,7 @@ struct Bus {
 };
 
 template <bool FILTER, bool SEND>
-IRAM_ATTR void renderVoice(Voice& v, Bus& bus, uint64_t inc, float amp1) {
+AUDIO_HOT void renderVoice(Voice& v, Bus& bus, uint64_t inc, float amp1) {
   const int16_t* s = g_sf->samples;
   float amp = v.amp;
   const float dAmp = (amp1 - amp) * (1.0f / BLOCK);
@@ -634,7 +669,7 @@ IRAM_ATTR void renderVoice(Voice& v, Bus& bus, uint64_t inc, float amp1) {
   v.z2 = z2;
 }
 
-int renderRange(int from, int to, Bus& bus) {
+AUDIO_HOT int renderRange(int from, int to, Bus& bus) {
   memset(&bus, 0, sizeof(bus));
   int active = 0;
   for (int i = from; i < to; i++) {
@@ -660,7 +695,7 @@ int renderRange(int from, int to, Bus& bus) {
 
 Bus g_busA, g_busB;
 float g_fxIn[BLOCK];
-// Reverb runs on the worker core one block behind: input of block N-1,
+// Reverb runs on the helper core one block behind: input of block N-1,
 // output added to block N.
 float g_revIn[BLOCK];
 float g_revOut[BLOCK * 2];
@@ -668,59 +703,61 @@ effects::Reverb g_reverb;
 effects::Chorus g_chorus;
 float g_reverbLevel = 1.0f, g_chorusLevel = 1.0f;
 
-volatile int g_workerActive;
+int g_helperActive;
+float g_load;
 
-void workerTask(void*) {
-  for (;;) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    g_workerActive = renderRange(SPLIT, NUM_VOICES, g_busB);
-    memset(g_revOut, 0, sizeof(g_revOut));
-    g_reverb.process(g_revIn, g_revOut, BLOCK, g_reverbLevel);
-    xTaskNotifyGive(g_audioTask);
-  }
+// Second half of the voices + reverb, on the other core
+AUDIO_HOT void helperJob() {
+  g_helperActive = renderRange(SPLIT, TOTAL_VOICES, g_busB);
+  memset(g_revOut, 0, sizeof(g_revOut));
+  g_reverb.process(g_revIn, g_revOut, BLOCK, g_reverbLevel);
 }
 
-void audioTask(void*) {
+// One output block, on the audio core
+AUDIO_HOT void audioBlock() {
   const float blockUs = BLOCK * 1e6f / g_fs;
-  float load = 0;
-  for (;;) {
-    Event e;
-    while (xQueueReceive(g_events, &e, 0) == pdTRUE) handleEvent(e);
+  Event e;
+  while (popEvent(e)) handleEvent(e);
 
-    uint32_t t0 = micros();
-    xTaskNotifyGive(g_workerTask);
-    int active = renderRange(0, SPLIT, g_busA);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    active += g_workerActive;
+  uint32_t t0 = micros();
+  platform::helperStart();
+  int active = renderRange(0, SPLIT, g_busA);
+  platform::helperWait();
+  active += g_helperActive;
 
-    float* mix = g_busA.dry;
-    for (int i = 0; i < BLOCK * 2; i++) mix[i] += g_busB.dry[i] + g_revOut[i];
-    for (int i = 0; i < BLOCK; i++) g_revIn[i] = g_busA.reverb[i] + g_busB.reverb[i];
-    for (int i = 0; i < BLOCK; i++) g_fxIn[i] = g_busA.chorus[i] + g_busB.chorus[i];
-    g_chorus.process(g_fxIn, mix, BLOCK, g_chorusLevel);
+  float* mix = g_busA.dry;
+  for (int i = 0; i < BLOCK * 2; i++) mix[i] += g_busB.dry[i] + g_revOut[i];
+  for (int i = 0; i < BLOCK; i++) g_revIn[i] = g_busA.reverb[i] + g_busB.reverb[i];
+  for (int i = 0; i < BLOCK; i++) g_fxIn[i] = g_busA.chorus[i] + g_busB.chorus[i];
+  g_chorus.process(g_fxIn, mix, BLOCK, g_chorusLevel);
 
-    const float gain = g_master;
-    for (int i = 0; i < BLOCK * 2; i++) {
-      float x = mix[i] * gain;
-      g_out[i] = (int16_t)constrain(x, -32767.0f, 32767.0f);
+  const float gain = g_master * g_masterVolume;
+  for (int i = 0; i < BLOCK * 2; i++) {
+    float x = mix[i] * gain;
+    if (fabsf(x) > 32767.0f) {
+      x = x > 0 ? 32767.0f : -32767.0f;
+      g_stats.clipped++;
     }
-    uint32_t elapsed = micros() - t0;
-
-    float l = elapsed / blockUs;
-    load = load * 0.98f + l * 0.02f;
-    if (l > 1.0f) g_stats.lateBlocks++;
-    g_stats.underruns = audio_out::underruns();
-    g_stats.cpuLoad = load;
-    g_stats.activeVoices = active;
-    if (active > g_stats.peakVoices) g_stats.peakVoices = active;
-    for (int c = 0; c < 16; c++) {
-      g_stats.program[c] = g_ch[c].program;
-      g_stats.drum[c] = g_ch[c].drum;
-      g_stats.presetName[c] = g_ch[c].preset ? g_ch[c].preset->name : "---";
-    }
-
-    audio_out::write(g_out, BLOCK);
+    g_out[i] = (int16_t)x;
   }
+  uint32_t elapsed = micros() - t0;
+
+  float l = elapsed / blockUs;
+  g_load = g_load * 0.98f + l * 0.02f;
+  if (l > 1.0f) g_stats.lateBlocks++;
+  if (l > g_stats.peakLoad) g_stats.peakLoad = l;
+  g_stats.blocks++;
+  g_stats.underruns = audio_out::underruns();
+  g_stats.cpuLoad = g_load;
+  g_stats.activeVoices = active;
+  if (active > g_stats.peakVoices) g_stats.peakVoices = active;
+  for (int c = 0; c < 16; c++) {
+    g_stats.program[c] = g_ch[c].program;
+    g_stats.drum[c] = g_ch[c].drum;
+    g_stats.presetName[c] = g_ch[c].preset ? g_ch[c].preset->name : "---";
+  }
+
+  audio_out::write(g_out, BLOCK);
 }
 
 }  // namespace
@@ -729,31 +766,25 @@ bool begin(const SoundFont* sf, uint32_t sampleRate) {
   g_sf = sf;
   g_fs = sampleRate;
   g_dt = BLOCK / g_fs;
-  g_voices = (Voice*)heap_caps_calloc(NUM_VOICES, sizeof(Voice), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  g_voices = (Voice*)platform::allocFast(TOTAL_VOICES * sizeof(Voice));
   if (!g_voices) return false;
   for (int i = 0; i < 16; i++) resetChannel(i);
 
   if (!g_reverb.begin(g_fs) || !g_chorus.begin(g_fs)) return false;
 
-  g_events = xQueueCreate(512, sizeof(Event));
   if (!audio_out::begin(sampleRate)) return false;
-
-  // The worker must exist before the audio task starts notifying it
-  xTaskCreatePinnedToCore(workerTask, "synth2", 6144, nullptr, configMAX_PRIORITIES - 2, &g_workerTask, 0);
-  xTaskCreatePinnedToCore(audioTask, "synth", 6144, nullptr, configMAX_PRIORITIES - 2, &g_audioTask, 1);
-  return true;
+  g_started = true;
+  return platform::startAudio(audioBlock, helperJob);
 }
 
 void midiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
-  if (!g_events || status < 0x80 || status >= 0xF0) return;
-  Event e{status, d1, d2};
-  xQueueSend(g_events, &e, 0);
+  if (!g_started || status < 0x80 || status >= 0xF0) return;
+  pushEvent(Event{status, d1, d2});
 }
 
 void reset() {
-  if (!g_events) return;
-  Event e{EV_RESET, 0, 0};
-  xQueueSend(g_events, &e, 0);
+  if (!g_started) return;
+  pushEvent(Event{EV_RESET, 0, 0});
 }
 
 void sysex(const uint8_t* d, size_t len) {
@@ -766,6 +797,10 @@ void sysex(const uint8_t* d, size_t len) {
     reset();
   } else if (len >= 9 && d[1] == 0x43 && (d[2] & 0xF0) == 0x10 && d[3] == 0x4C && d[6] == 0x7E) {
     reset();
+  } else if (len >= 8 && d[1] == 0x7F && d[3] == 0x04 && d[4] == 0x01) {
+    // GM Master Volume: F0 7F xx 04 01 ll mm F7
+    float v = ((d[6] << 7) | d[5]) / 16383.0f;
+    g_masterVolume = v * v;
   }
 }
 
