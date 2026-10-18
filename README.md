@@ -49,6 +49,29 @@ macOS では BOX-Lite は「Espressif ESP32-S3-Box」、XIAO はボード定義�
 認識されます。
 USB シリアルに生の MIDI バイト列を送っても演奏できます(テスト用)。
 
+### 大きな SoundFont を縮める
+
+`tools/sf2shrink.py` は SoundFont をフラッシュに収まる SF2 に変換します(要 `brew install sox`)。
+SF3 は展開し、サンプルを指定サイズに収まるレートまで下げます(ループ長は整数のまま保つので
+音程はずれない)。出力は 32kHz なので、16kHz を超える成分はもともと鳴りません。
+
+```sh
+# GeneralUser GS (30.8MB) を RP2350 の 15MB 領域へ。GM とドラム(バンク 0 / 128)だけ残し、
+# アコースティックピアノ(プログラム 0〜3)は 32kHz、ほかは収まるレート(約 13.9kHz)にする
+python3 tools/sf2shrink.py GeneralUser-GS.sf2 soundfont/default.sf2 \
+    --max-size 14.9M --banks 0,128 --keep 0-3 --keep-rate 32000
+```
+
+| オプション | 内容 |
+|---|---|
+| `--max-size` | 出力サイズの上限。収まる最大のレートを 100Hz 刻みで選ぶ |
+| `--rate` | サンプルレートの上限を直接指定 |
+| `--banks` | 残すバンク |
+| `--keep` / `--keep-rate` | 指定したバンク 0 のプログラムのサンプルだけ別の上限にする |
+| `--mono` | ステレオのサンプル対をモノラルにまとめる |
+
+FluidR3Mono_GM(SF3 22.6MB)は展開すると約 218MB あり、15MB には収まらなかった。
+
 ## XIAO ESP32S3 + PCM5102A の配線
 
 | PCM5102A | XIAO ESP32S3 |
@@ -91,13 +114,19 @@ PlatformIO Core 6.2.0 以上が必要です(PlatformIO IDE 同梱の `~/.platfor
 - SoundFont はフラッシュ末尾の filesystem 領域(0x100FF000〜、15MB)に生のまま置き、XIP で直接読む。
   `pio run -e weact-rp2350 -t uploadsf2` は 1200bps touch で BOOTSEL に入れて picotool で書き込む
   (うまくいかない場合は BOOT を押しながら RESET)
-- PSRAM がないので、リージョン表は SRAM に置く(同じ値のジェネレータ列は共有。TimGM6mb で約160KB)
+- PSRAM がないので、リージョン表は SRAM に置く。全プリセットを起動時に展開すると GeneralUser GS で
+  約 420KB になって入らないため、チャンネルが選んだプリセットだけをプログラムチェンジ時に展開し、
+  使われていないものはヒープの空きが `SF2_HEAP_RESERVE`(32KB)を切る前に古い順に解放する
 - コア 1 がオーディオループ、コア 0 が `loop()` の合間にボイスの後半とリバーブを処理する。
   コア 0 が間に合わないときはコア 1 が肩代わりするので、音は止まらず処理できるボイスが減るだけ
 - 描画ループ・エフェクトは SRAM に配置(`AUDIO_HOT`)。フラッシュのキャッシュは波形の読み出しに使う
 - ボタンなし。音量は GM マスターボリュームの SysEx か CC7。LED(GP25)は発音中に点灯
-- 初期音量は BOX-Lite の -12dB(`DEFAULT_MASTER_GAIN` 0.09)。これより大きいと
-  イヤホンモジュールのアンプ(HT97226)で歪む
+- 初期音量は BOX-Lite の -18dB(`DEFAULT_MASTER_GAIN` 0.045)。TimGM6mb では -12dB(0.09)まで
+  大丈夫だったが、音の大きい GeneralUser GS ではイヤホンモジュールのアンプ(HT97226)で歪んだ
+- 低いレートのサンプル(13.9kHz に縮めた GeneralUser GS など)は、線形補間で帯域の上に折り返しの像が
+  残ってザラつくので、ボイスのローパスフィルタをサンプルの帯域端(サンプルレート × ピッチ比 × 0.45)
+  以下に抑える。GeneralUser GS(ピアノ以外 13.9kHz)のオーケストラデモでは CPU 1 秒平均が最大 93%、
+  1 ブロックの最大 117%(処理落ち 66 ブロック、アンダーランなし)
 - 出力バッファは 8 × 64 フレーム(16ms)。3 × 128 では数秒ごとにアンダーランした
 - `weact-rp2350-128` は 150MHz で起動してから、コア電圧 1.20V・フラッシュ分周 /4 にして 240MHz に上げる
   (`SYNTH_CPU_MHZ`)。F_CPU=240MHz で起動すると立ち上がらなかった
@@ -187,7 +216,7 @@ BOX-Lite で `tools/demo/orchestra.mid`(常に 128 音)を再生したときは�
 
 | ファイル | 内容 |
 |---|---|
-| `src/sf2.*` | SF2 パーサ(プリセット×インストゥルメントのゾーンをリージョンに展開して RAM / PSRAM に置く) |
+| `src/sf2.*` | SF2 パーサ(プリセット×インストゥルメントのゾーンを、使うプリセットの分だけリージョンに展開して RAM / PSRAM に置く) |
 | `src/synth.*` | ボイス管理、エンベロープ/LFO/フィルタ、MIDI処理、2コアのレンダリング |
 | `src/effects.*` | リバーブ / コーラス |
 | `src/board.h` | ボードごとのピン定義と機能の有無 |
@@ -198,6 +227,7 @@ BOX-Lite で `tools/demo/orchestra.mid`(常に 128 音)を再生したときは�
 | `src/midi_in.*` | USB-MIDI / UART MIDI の受信とパース |
 | `src/display.*` | LovyanGFX による状態表示(画面のないボードでは空の実装) |
 | `scripts/upload_sf2.py` | `uploadsf2` ターゲット |
+| `tools/sf2shrink.py` | SoundFont をフラッシュに収まるよう縮める変換スクリプト |
 
 ## ライセンス
 
@@ -213,6 +243,6 @@ BOX-Lite で `tools/demo/orchestra.mid`(常に 128 音)を再生したときは�
 | TinyUSB | MIT | Arduino-ESP32 に同梱 |
 | Freeverb(`src/effects.cpp` のリバーブ) | パブリックドメイン | Jezar at Dreampoint |
 | ES8156 初期化シーケンス | — | Espressif esp_codec_dev(Apache-2.0)のレジスタ設定を参照 |
-| SoundFont | 各 SoundFont のライセンス | リポジトリには含まない。例: TimGM6mb は GPLv2。書き込み済みの機器を配布する場合は SoundFont のライセンスに従うこと |
+| SoundFont | 各 SoundFont のライセンス | リポジトリには含まない。例: TimGM6mb は GPLv2、GeneralUser GS は独自ライセンス(改変・同梱可)、FluidR3 は MIT。書き込み済みの機器を配布する場合は SoundFont のライセンスに従うこと |
 
 USB の VID/PID は Espressif のもの(303A:1001)を使っています。製品として配布する場合は独自の PID を取得してください。

@@ -30,7 +30,7 @@ struct Stats {
 };
 
 // Starts audio output and rendering on both cores. `sf` must outlive the synth.
-bool begin(const sf2::SoundFont* sf, uint32_t sampleRate = SYNTH_SAMPLE_RATE);
+bool begin(sf2::SoundFont* sf, uint32_t sampleRate = SYNTH_SAMPLE_RATE);
 
 // The event functions below queue to the audio core. Call them from one
 // thread only (the main loop).

@@ -94,7 +94,8 @@
 #define LED_ACTIVE_LOW 0
 
 // The HT97226 headphone amp distorts above about -12dB of the BOX-Lite level
-#define DEFAULT_MASTER_GAIN 0.09f
+// (TimGM6mb); louder SoundFonts such as GeneralUser GS need another -6dB
+#define DEFAULT_MASTER_GAIN 0.045f
 
 #else
 #error "Select a board: -DBOARD_BOX_LITE, -DBOARD_XIAO_PCM5102 or -DBOARD_WEACT_RP2350"

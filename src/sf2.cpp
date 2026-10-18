@@ -177,9 +177,13 @@ inline uint8_t rangeHi(int16_t v) { return (uint16_t)v >> 8; }
 
 // Deduplicating store of PARAM_COUNT-sized generator arrays. Most regions of
 // an instrument share their articulation, so this roughly halves the table.
+// Scratch space while a preset is built; the result is copied out.
 class ParamPool {
  public:
-  ~ParamPool() { free(table_); }
+  ~ParamPool() {
+    free(table_);
+    free(data);
+  }
 
   // Returns the index of `p` in the pool (adding it when new), -1 when out of memory.
   int32_t intern(const int16_t* p) {
@@ -191,7 +195,7 @@ class ParamPool {
       if (memcmp(data + (e - 1) * PARAM_COUNT, p, BYTES) == 0) return e - 1;
     }
     if (count == cap) {
-      uint32_t newCap = cap ? cap * 2 : 256;
+      uint32_t newCap = cap ? cap + cap / 2 : 256;
       int16_t* grown = (int16_t*)platform::reallocLarge(data, newCap * BYTES);
       if (!grown) return -1;
       data = grown;
@@ -200,16 +204,6 @@ class ParamPool {
     memcpy(data + count * PARAM_COUNT, p, BYTES);
     insert(count);
     return count++;
-  }
-
-  // Pre-allocates room for `n` sets so that intern() does not need to grow.
-  bool reserve(uint32_t n) {
-    if (n <= cap) return true;
-    int16_t* d = (int16_t*)platform::reallocLarge(data, n * BYTES);
-    if (!d) return false;
-    data = d;
-    cap = n;
-    return true;
   }
 
   int16_t* data = nullptr;
@@ -288,162 +282,202 @@ bool SoundFont::parse(const uint8_t* data, uint32_t size) {
   if (!phdr.data || !pbag.data || !pgen.data || !inst.data || !ibag.data || !igen.data || !shdr.data) {
     return fail("broken SF2 (missing pdta chunk)");
   }
+  pbag_ = pbag.data;
+  pgen_ = pgen.data;
+  inst_ = inst.data;
+  ibag_ = ibag.data;
+  igen_ = igen.data;
+  shdr_ = shdr.data;
+  nPbag_ = pbag.size / BAG_SIZE;
+  nPgen_ = pgen.size / GEN_SIZE;
+  nInst_ = inst.size / INST_SIZE;
+  nIbag_ = ibag.size / BAG_SIZE;
+  nIgen_ = igen.size / GEN_SIZE;
+  nShdr_ = shdr.size / SHDR_SIZE;
 
   const uint32_t nPhdr = phdr.size / PHDR_SIZE;  // includes terminal EOP record
-  const uint32_t nPbag = pbag.size / BAG_SIZE;
-  const uint32_t nPgen = pgen.size / GEN_SIZE;
-  const uint32_t nInst = inst.size / INST_SIZE;
-  const uint32_t nIbag = ibag.size / BAG_SIZE;
-  const uint32_t nIgen = igen.size / GEN_SIZE;
-  const uint32_t nShdr = shdr.size / SHDR_SIZE;
-  if (nPhdr < 2 || nInst < 2 || nShdr < 2) return fail("SF2 has no presets");
+  if (nPhdr < 2 || nInst_ < 2 || nShdr_ < 2) return fail("SF2 has no presets");
 
   Preset* outPresets = (Preset*)platform::allocLarge((nPhdr - 1) * sizeof(Preset));
   if (!outPresets) return fail("out of memory");
-  Region* outRegions = nullptr;
-  uint32_t nRegions = 0;
-  ParamPool pool;
-
-  int16_t pGlobal[gen::COUNT], pZone[gen::COUNT], iGlobal[gen::COUNT], iZone[gen::COUNT];
-
-  // Pass 0 counts the regions, pass 1 fills exactly sized tables: growing them
-  // would need old + new copies at once, which does not fit without PSRAM.
-  for (int pass = 0; pass < 2; pass++) {
-    const bool store = pass == 1;
-    if (store) {
-      outRegions = (Region*)platform::allocLarge((nRegions ? nRegions : 1) * sizeof(Region));
-      if (!outRegions || !pool.reserve(nRegions)) return fail("out of memory");
-      nRegions = 0;
-    }
-    for (uint32_t pi = 0; pi + 1 < nPhdr; pi++) {
-      const uint8_t* ph = phdr.data + pi * PHDR_SIZE;
-      Preset& pr = outPresets[pi];
-      memcpy(pr.name, ph, 20);
-      pr.name[20] = 0;
-      pr.program = rd16(ph + 20);
-      pr.bank = rd16(ph + 22);
-      pr.firstRegion = nRegions;
-
-      uint32_t bag0 = rd16(ph + 24), bag1 = rd16(ph + PHDR_SIZE + 24);
-      if (bag1 > nPbag) bag1 = nPbag;
-      presetDefaults(pGlobal);
-
-      for (uint32_t b = bag0; b < bag1; b++) {
-        uint32_t g0 = rd16(pbag.data + b * BAG_SIZE);
-        uint32_t g1 = (b + 1 < nPbag) ? rd16(pbag.data + (b + 1) * BAG_SIZE) : nPgen;
-        if (g1 > nPgen) g1 = nPgen;
-        if (g0 >= g1) continue;
-
-        // A preset zone without a trailing 'instrument' generator is the global zone
-        bool hasInst = rd16(pgen.data + (g1 - 1) * GEN_SIZE) == gen::instrument;
-        if (!hasInst) {
-          if (b == bag0) applyGens(pGlobal, pgen.data, g0, g1);
-          continue;
-        }
-        memcpy(pZone, pGlobal, sizeof(pZone));
-        applyGens(pZone, pgen.data, g0, g1);
-        uint32_t ii = (uint16_t)pZone[gen::instrument];
-        if (ii + 1 >= nInst) continue;
-
-        const uint8_t* in = inst.data + ii * INST_SIZE;
-        uint32_t ib0 = rd16(in + 20), ib1 = rd16(in + INST_SIZE + 20);
-        if (ib1 > nIbag) ib1 = nIbag;
-        instrumentDefaults(iGlobal);
-
-        for (uint32_t ib = ib0; ib < ib1; ib++) {
-          uint32_t h0 = rd16(ibag.data + ib * BAG_SIZE);
-          uint32_t h1 = (ib + 1 < nIbag) ? rd16(ibag.data + (ib + 1) * BAG_SIZE) : nIgen;
-          if (h1 > nIgen) h1 = nIgen;
-          if (h0 >= h1) continue;
-
-          bool hasSample = rd16(igen.data + (h1 - 1) * GEN_SIZE) == gen::sampleID;
-          if (!hasSample) {
-            if (ib == ib0) applyGens(iGlobal, igen.data, h0, h1);
-            continue;
-          }
-          memcpy(iZone, iGlobal, sizeof(iZone));
-          applyGens(iZone, igen.data, h0, h1);
-
-          uint32_t si = (uint16_t)iZone[gen::sampleID];
-          if (si + 1 >= nShdr) continue;
-          const uint8_t* sh = shdr.data + si * SHDR_SIZE;
-          if (rd16(sh + 44) & 0x8000) continue;  // ROM sample
-
-          // Key/velocity ranges are the intersection of both levels
-          uint8_t loKey = max(rangeLo(pZone[gen::keyRange]), rangeLo(iZone[gen::keyRange]));
-          uint8_t hiKey = min(rangeHi(pZone[gen::keyRange]), rangeHi(iZone[gen::keyRange]));
-          uint8_t loVel = max(rangeLo(pZone[gen::velRange]), rangeLo(iZone[gen::velRange]));
-          uint8_t hiVel = min(rangeHi(pZone[gen::velRange]), rangeHi(iZone[gen::velRange]));
-          if (loKey > hiKey || loVel > hiVel) continue;
-
-          Region scratch;
-          Region& r = store ? outRegions[nRegions] : scratch;
-          int16_t g[gen::COUNT];
-          for (int op = 0; op < gen::COUNT; op++) {
-            g[op] = isNonAdditive(op) ? iZone[op] : (int16_t)(iZone[op] + pZone[op]);
-          }
-          r.loKey = loKey;
-          r.hiKey = hiKey;
-          r.loVel = loVel;
-          r.hiVel = hiVel;
-
-          int64_t start = (int64_t)rd32(sh + 20) + g[gen::startAddrsOffset] + g[gen::startAddrsCoarseOffset] * 32768;
-          int64_t end = (int64_t)rd32(sh + 24) + g[gen::endAddrsOffset] + g[gen::endAddrsCoarseOffset] * 32768;
-          int64_t ls = (int64_t)rd32(sh + 28) + g[gen::startloopAddrsOffset] +
-                       g[gen::startloopAddrsCoarseOffset] * 32768;
-          int64_t le = (int64_t)rd32(sh + 32) + g[gen::endloopAddrsOffset] + g[gen::endloopAddrsCoarseOffset] * 32768;
-          int64_t last = (int64_t)sampleCount - 1;
-          start = constrain(start, 0, last);
-          end = constrain(end, start, last);
-          if (end - start < 2) continue;
-          r.start = start;
-          r.end = end;
-          r.loopMode = g[gen::sampleModes] & 3;
-          if (r.loopMode == 2) r.loopMode = 0;
-          if (ls < start || le > end || le - ls < 2) r.loopMode = 0;
-          r.loopStart = r.loopMode ? ls : start;
-          r.loopEnd = r.loopMode ? le : end;
-
-          r.sampleRate = rd32(sh + 36);
-          if (r.sampleRate < 400) r.sampleRate = 44100;
-          uint8_t origPitch = sh[40];
-          if (origPitch > 127) origPitch = 60;
-          int16_t rootOverride = g[gen::overridingRootKey];
-          r.rootKey = (rootOverride >= 0 && rootOverride <= 127) ? rootOverride : origPitch;
-          r.tuneCents = g[gen::coarseTune] * 100 + g[gen::fineTune] + (int8_t)sh[41];
-
-          if (store) {
-            int16_t params[PARAM_COUNT];
-            for (int i = 0; i < PARAM_COUNT; i++) params[i] = g[kParamGen[i]];
-            int32_t index = pool.intern(params);
-            if (index < 0) return fail("out of memory");
-            // The pool may still move; store the index and resolve it below
-            r.gen = reinterpret_cast<const int16_t*>((uintptr_t)index);
-          }
-          nRegions++;
-        }
-      }
-      pr.regionCount = nRegions - pr.firstRegion;
-    }
+  regionCount = 0;
+  for (uint32_t pi = 0; pi + 1 < nPhdr; pi++) {
+    const uint8_t* ph = phdr.data + pi * PHDR_SIZE;
+    Preset& pr = outPresets[pi];
+    memcpy(pr.name, ph, 20);
+    pr.name[20] = 0;
+    pr.program = rd16(ph + 20);
+    pr.bank = rd16(ph + 22);
+    pr.bag0 = rd16(ph + 24);
+    pr.bag1 = rd16(ph + PHDR_SIZE + 24);
+    walkRegions(pr, [&](const Region&, const int16_t*) { pr.regionCount++; });
+    regionCount += pr.regionCount;
   }
-
-  // The pool was sized for one set per region; release the unused part
-  if (pool.count) {
-    if (int16_t* d = (int16_t*)platform::reallocLarge(pool.data, pool.count * PARAM_COUNT * sizeof(int16_t))) {
-      pool.data = d;
-    }
-  }
-  for (uint32_t i = 0; i < nRegions; i++) {
-    outRegions[i].gen = pool.data + (uintptr_t)outRegions[i].gen * PARAM_COUNT;
-  }
-
   presets = outPresets;
   presetCount = nPhdr - 1;
-  regions = outRegions;
-  regionCount = nRegions;
-  paramSetCount = pool.count;
   if (!name_[0]) strcpy(name_, "SoundFont");
   return true;
+}
+
+// Flattens the preset's zones into regions: emit(region, merged generators).
+// region.gen is left unset.
+template <typename Emit>
+void SoundFont::walkRegions(const Preset& pr, Emit&& emit) const {
+  int16_t pGlobal[gen::COUNT], pZone[gen::COUNT], iGlobal[gen::COUNT], iZone[gen::COUNT];
+  uint32_t bag1 = pr.bag1 > nPbag_ ? nPbag_ : pr.bag1;
+  presetDefaults(pGlobal);
+
+  for (uint32_t b = pr.bag0; b < bag1; b++) {
+    uint32_t g0 = rd16(pbag_ + b * BAG_SIZE);
+    uint32_t g1 = (b + 1 < nPbag_) ? rd16(pbag_ + (b + 1) * BAG_SIZE) : nPgen_;
+    if (g1 > nPgen_) g1 = nPgen_;
+    if (g0 >= g1) continue;
+
+    // A preset zone without a trailing 'instrument' generator is the global zone
+    bool hasInst = rd16(pgen_ + (g1 - 1) * GEN_SIZE) == gen::instrument;
+    if (!hasInst) {
+      if (b == pr.bag0) applyGens(pGlobal, pgen_, g0, g1);
+      continue;
+    }
+    memcpy(pZone, pGlobal, sizeof(pZone));
+    applyGens(pZone, pgen_, g0, g1);
+    uint32_t ii = (uint16_t)pZone[gen::instrument];
+    if (ii + 1 >= nInst_) continue;
+
+    const uint8_t* in = inst_ + ii * INST_SIZE;
+    uint32_t ib0 = rd16(in + 20), ib1 = rd16(in + INST_SIZE + 20);
+    if (ib1 > nIbag_) ib1 = nIbag_;
+    instrumentDefaults(iGlobal);
+
+    for (uint32_t ib = ib0; ib < ib1; ib++) {
+      uint32_t h0 = rd16(ibag_ + ib * BAG_SIZE);
+      uint32_t h1 = (ib + 1 < nIbag_) ? rd16(ibag_ + (ib + 1) * BAG_SIZE) : nIgen_;
+      if (h1 > nIgen_) h1 = nIgen_;
+      if (h0 >= h1) continue;
+
+      bool hasSample = rd16(igen_ + (h1 - 1) * GEN_SIZE) == gen::sampleID;
+      if (!hasSample) {
+        if (ib == ib0) applyGens(iGlobal, igen_, h0, h1);
+        continue;
+      }
+      memcpy(iZone, iGlobal, sizeof(iZone));
+      applyGens(iZone, igen_, h0, h1);
+
+      uint32_t si = (uint16_t)iZone[gen::sampleID];
+      if (si + 1 >= nShdr_) continue;
+      const uint8_t* sh = shdr_ + si * SHDR_SIZE;
+      if (rd16(sh + 44) & 0x8000) continue;  // ROM sample
+
+      // Key/velocity ranges are the intersection of both levels
+      uint8_t loKey = max(rangeLo(pZone[gen::keyRange]), rangeLo(iZone[gen::keyRange]));
+      uint8_t hiKey = min(rangeHi(pZone[gen::keyRange]), rangeHi(iZone[gen::keyRange]));
+      uint8_t loVel = max(rangeLo(pZone[gen::velRange]), rangeLo(iZone[gen::velRange]));
+      uint8_t hiVel = min(rangeHi(pZone[gen::velRange]), rangeHi(iZone[gen::velRange]));
+      if (loKey > hiKey || loVel > hiVel) continue;
+
+      Region r;
+      int16_t g[gen::COUNT];
+      for (int op = 0; op < gen::COUNT; op++) {
+        g[op] = isNonAdditive(op) ? iZone[op] : (int16_t)(iZone[op] + pZone[op]);
+      }
+      r.loKey = loKey;
+      r.hiKey = hiKey;
+      r.loVel = loVel;
+      r.hiVel = hiVel;
+
+      int64_t start = (int64_t)rd32(sh + 20) + g[gen::startAddrsOffset] + g[gen::startAddrsCoarseOffset] * 32768;
+      int64_t end = (int64_t)rd32(sh + 24) + g[gen::endAddrsOffset] + g[gen::endAddrsCoarseOffset] * 32768;
+      int64_t ls = (int64_t)rd32(sh + 28) + g[gen::startloopAddrsOffset] +
+                   g[gen::startloopAddrsCoarseOffset] * 32768;
+      int64_t le = (int64_t)rd32(sh + 32) + g[gen::endloopAddrsOffset] + g[gen::endloopAddrsCoarseOffset] * 32768;
+      int64_t last = (int64_t)sampleCount - 1;
+      start = constrain(start, 0, last);
+      end = constrain(end, start, last);
+      if (end - start < 2) continue;
+      r.start = start;
+      r.end = end;
+      r.loopMode = g[gen::sampleModes] & 3;
+      if (r.loopMode == 2) r.loopMode = 0;
+      if (ls < start || le > end || le - ls < 2) r.loopMode = 0;
+      r.loopStart = r.loopMode ? ls : start;
+      r.loopEnd = r.loopMode ? le : end;
+
+      r.sampleRate = rd32(sh + 36);
+      if (r.sampleRate < 400) r.sampleRate = 44100;
+      uint8_t origPitch = sh[40];
+      if (origPitch > 127) origPitch = 60;
+      int16_t rootOverride = g[gen::overridingRootKey];
+      r.rootKey = (rootOverride >= 0 && rootOverride <= 127) ? rootOverride : origPitch;
+      r.tuneCents = g[gen::coarseTune] * 100 + g[gen::fineTune] + (int8_t)sh[41];
+      r.gen = nullptr;
+      emit(r, g);
+    }
+  }
+}
+
+// Builds the preset's region table: Region[regionCount] followed by the
+// distinct generator arrays, in one allocation.
+bool SoundFont::build(Preset& p) {
+  ParamPool pool;
+  int16_t params[PARAM_COUNT];
+  bool ok = true;
+  walkRegions(p, [&](const Region&, const int16_t* g) {
+    for (int i = 0; i < PARAM_COUNT; i++) params[i] = g[kParamGen[i]];
+    if (pool.intern(params) < 0) ok = false;
+  });
+  if (!ok) return false;
+
+  const uint32_t bytes = p.regionCount * sizeof(Region) + pool.count * PARAM_COUNT * sizeof(int16_t);
+  void* mem = platform::allocLarge(bytes);
+  while (!mem && evictOne(&p)) mem = platform::allocLarge(bytes);
+  if (!mem) return false;
+
+  Region* regs = (Region*)mem;
+  int16_t* sets = (int16_t*)(regs + p.regionCount);
+  memcpy(sets, pool.data, pool.count * PARAM_COUNT * sizeof(int16_t));
+  uint32_t n = 0;
+  walkRegions(p, [&](const Region& r, const int16_t* g) {
+    for (int i = 0; i < PARAM_COUNT; i++) params[i] = g[kParamGen[i]];
+    regs[n] = r;
+    regs[n].gen = sets + pool.intern(params) * PARAM_COUNT;  // already present: no allocation
+    n++;
+  });
+  p.regions = regs;
+  p.bytes = bytes;
+  cacheBytes_ += bytes;
+  return true;
+}
+
+// Frees the least recently used built preset that is not `keep` and not in use.
+bool SoundFont::evictOne(const Preset* keep) {
+  Preset* victim = nullptr;
+  for (uint32_t i = 0; i < presetCount; i++) {
+    Preset& p = presets[i];
+    if (!p.regions || &p == keep || (inUse_ && inUse_(&p))) continue;
+    if (!victim || (int32_t)(p.lastUse - victim->lastUse) < 0) victim = &p;
+  }
+  if (!victim) return false;
+  free(victim->regions);
+  victim->regions = nullptr;
+  cacheBytes_ -= victim->bytes;
+  victim->bytes = 0;
+  return true;
+}
+
+const Region* SoundFont::regionsOf(const Preset* preset) {
+  Preset& p = presets[preset - presets];
+  p.lastUse = ++useCounter_;
+  if (p.regions || !p.regionCount) return p.regions;
+  // Upper bound of the table size (no shared generator arrays)
+  const uint32_t estimate = p.regionCount * (sizeof(Region) + PARAM_COUNT * sizeof(int16_t));
+  while (cacheBytes_ + estimate > cacheLimit_ && evictOne(&p)) {
+  }
+  if (!build(p)) {
+    while (evictOne(&p)) {
+    }
+    build(p);
+  }
+  return p.regions;
 }
 
 const Preset* SoundFont::findPreset(uint16_t bank, uint16_t program) const {

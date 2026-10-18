@@ -234,7 +234,7 @@ struct Event {
   uint8_t status, d1, d2;
 };
 
-const SoundFont* g_sf;
+SoundFont* g_sf;
 float g_fs;
 float g_dt;  // block duration
 float g_master = 0.35f;
@@ -290,6 +290,20 @@ void selectPreset(Channel& c) {
     if (!p) p = g_sf->findPreset(0, c.program);
   }
   c.preset = p;
+  if (p) g_sf->regionsOf(p);  // build now rather than on the first note
+}
+
+// Presets a channel has selected or a voice still plays must stay built
+bool presetInUse(const Preset* p) {
+  for (int i = 0; i < 16; i++) {
+    if (g_ch[i].preset == p) return true;
+  }
+  const Region* first = p->regions;
+  for (int i = 0; i < TOTAL_VOICES; i++) {
+    const Voice& v = g_voices[i];
+    if (v.active && v.r >= first && v.r < first + p->regionCount) return true;
+  }
+  return false;
 }
 
 void resetControllers(Channel& c) {
@@ -458,7 +472,8 @@ void noteOn(uint8_t ch, uint8_t key, uint8_t vel) {
 
   // Voices started by this note-on (e.g. a stereo pair) must not cut each other
   const uint32_t ageBefore = g_ageCounter;
-  const Region* regions = g_sf->regions + p->firstRegion;
+  const Region* regions = g_sf->regionsOf(p);
+  if (!regions) return;
   for (uint32_t i = 0; i < p->regionCount; i++) {
     const Region& r = regions[i];
     if (key < r.loKey || key > r.hiKey || vel < r.loVel || vel > r.hiVel) continue;
@@ -580,9 +595,12 @@ AUDIO_HOT bool updateVoiceControl(Voice& v, uint64_t& inc, float& amp) {
   inc = v.inc;
 
   float fc = g[initialFilterFc] + modEnv * g[modEnvToFilterFc] + v.modLfo.value * g[modLfoToFilterFc];
-  float fcHz = absCentsToHz(fminf(fc, 13500.0f));
-  bool on = fc < 13500.0f && fcHz < g_fs * 0.45f;
-  if (on && fabsf(fc - v.lastFc) > 2.0f) {
+  float fcHz = fc < 13500.0f ? absCentsToHz(fc) : 1e9f;
+  // Linear interpolation of a low-rate sample leaves images of its spectrum
+  // above its band edge (heard as grit): keep the filter below that edge.
+  fcHz = fminf(fcHz, (float)inc * (1.0f / 4294967296.0f) * g_fs * 0.45f);
+  bool on = fcHz < g_fs * 0.45f;
+  if (on && fabsf(fcHz - v.lastFc) > v.lastFc * 0.001f) {
     float w0 = 2.0f * (float)M_PI * fmaxf(fcHz, 20.0f) / g_fs;
     float cw = fastCos(w0), alpha = fastSin(w0) / (2.0f * v.filterQ);
     float a0 = 1.0f / (1.0f + alpha);
@@ -590,7 +608,7 @@ AUDIO_HOT bool updateVoiceControl(Voice& v, uint64_t& inc, float& amp) {
     v.b0 = v.b2 = v.b1 * 0.5f;
     v.a1 = -2.0f * cw * a0;
     v.a2 = (1.0f - alpha) * a0;
-    v.lastFc = fc;
+    v.lastFc = fcHz;
   }
   if (!on) {
     v.lastFc = -1;
@@ -762,12 +780,13 @@ AUDIO_HOT void audioBlock() {
 
 }  // namespace
 
-bool begin(const SoundFont* sf, uint32_t sampleRate) {
+bool begin(SoundFont* sf, uint32_t sampleRate) {
   g_sf = sf;
   g_fs = sampleRate;
   g_dt = BLOCK / g_fs;
   g_voices = (Voice*)platform::allocFast(TOTAL_VOICES * sizeof(Voice));
   if (!g_voices) return false;
+  sf->setInUse(presetInUse);
   for (int i = 0; i < 16; i++) resetChannel(i);
 
   if (!g_reverb.begin(g_fs) || !g_chorus.begin(g_fs)) return false;

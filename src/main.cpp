@@ -22,6 +22,10 @@ static sf2::SoundFont soundFont;
 #define DEFAULT_MASTER_GAIN 0.35f
 #endif
 static float masterGain = DEFAULT_MASTER_GAIN;
+// Heap left free for the rest of the firmware when presets are cached in it (no PSRAM)
+#ifndef SF2_HEAP_RESERVE
+#define SF2_HEAP_RESERVE (32 * 1024)
+#endif
 
 // Boot messages are kept and repeated when a serial monitor connects
 // (native USB: the host is usually not listening yet while setup() runs).
@@ -37,12 +41,15 @@ static void bootPrintf(const char* fmt, ...) {
   strncat(bootLog, line, sizeof(bootLog) - strlen(bootLog) - 1);
 }
 
+static bool running;  // synth started; the UI stays idle otherwise
+
 static void printStatus() {
   const synth::Stats& st = synth::stats();
   Serial.print(bootLog);
-  Serial.printf("status: blocks %lu, voices %u, cpu %d%%, late %lu, xrun %lu, free heap %lu\n",
+  Serial.printf("status: blocks %lu, voices %u, cpu %d%%, late %lu, xrun %lu, free heap %lu, presets %lu bytes\n",
                 (unsigned long)st.blocks, st.activeVoices, (int)(st.cpuLoad * 100), (unsigned long)st.lateBlocks,
-                (unsigned long)st.underruns, (unsigned long)platform::freeHeap());
+                (unsigned long)st.underruns, (unsigned long)platform::freeHeap(),
+                (unsigned long)soundFont.cacheBytes());
 }
 
 enum Button { BTN_NONE, BTN_PREV, BTN_ENTER, BTN_NEXT };
@@ -112,10 +119,9 @@ void setup() {
     bootPrintf("SoundFont error: %s\n", soundFont.error());
     display::showError("SoundFont error", soundFont.error());
   } else {
-    bootPrintf("SoundFont \"%s\": %lu presets, %lu regions (%lu param sets), %lu samples (%lu ms)\n",
-               soundFont.name(), (unsigned long)soundFont.presetCount, (unsigned long)soundFont.regionCount,
-               (unsigned long)soundFont.paramSetCount, (unsigned long)soundFont.sampleCount,
-               (unsigned long)(millis() - t0));
+    bootPrintf("SoundFont \"%s\": %lu presets, %lu regions, %lu samples (%lu ms)\n", soundFont.name(),
+               (unsigned long)soundFont.presetCount, (unsigned long)soundFont.regionCount,
+               (unsigned long)soundFont.sampleCount, (unsigned long)(millis() - t0));
     bootPrintf("Free heap %lu, PSRAM %lu\n", (unsigned long)platform::freeHeap(),
                (unsigned long)platform::freePsram());
     ok = synth::begin(&soundFont);
@@ -125,11 +131,16 @@ void setup() {
       display::showError("Audio error", "I2S / DAC init failed");
     } else {
       synth::setMasterGain(masterGain);
+      // Without PSRAM the built presets share the heap: keep some of it free
+      if (!platform::freePsram()) {
+        uint32_t heap = platform::freeHeap();
+        soundFont.setCacheLimit(heap > SF2_HEAP_RESERVE ? heap - SF2_HEAP_RESERVE : 0);
+      }
+      running = true;
       display::showHeader(soundFont.name(), soundFont.presetCount, soundFont.regionCount);
       bootPrintf("Synth running\n");
     }
   }
-  if (!ok) soundFont.regions = nullptr;  // keep the UI idle
   platform::diagStage(5);
 #ifdef LED_PIN
   digitalWrite(LED_PIN, LED_ACTIVE_LOW ? HIGH : LOW);
@@ -151,14 +162,14 @@ void loop() {
     if (connected && !wasConnected) printStatus();
     wasConnected = connected;
     platform::diagStage(8);
-    if (soundFont.regions) {
+    if (running) {
       display::update(masterGain);
       updateLed();
     }
   }
 
   static uint32_t lastLog = 0;
-  if (soundFont.regions && now - lastLog >= 1000) {
+  if (running && now - lastLog >= 1000) {
     lastLog = now;
     const synth::Stats& st = synth::stats();
     if (st.activeVoices) {
