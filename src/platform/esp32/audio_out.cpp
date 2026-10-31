@@ -36,7 +36,8 @@ static bool es8156Write(uint8_t reg, uint8_t val) {
   return Wire.endTransmission() == 0;
 }
 
-// Same sequence as Espressif esp_codec_dev (ES8156, slave mode, I2S 16bit)
+// Same sequence as Espressif esp_codec_dev (ES8156, slave mode).
+// 0x11 = 0x00: I2S, 24-bit word (the top 24 bits of the 32-bit slot)
 static bool es8156Init() {
   static const uint8_t seq[][2] = {
       {0x02, 0x04}, {0x20, 0x2A}, {0x21, 0x3C}, {0x22, 0x00}, {0x24, 0x07},
@@ -50,9 +51,15 @@ static bool es8156Init() {
   return true;
 }
 
-void setVolume(uint8_t v) { es8156Write(0x14, v); }
+// Digital volume 0x14: 0.5dB steps, 0xBF = 0dB, 0xFF = +32dB, 0x00 = -95.5dB (mute)
+bool setGain(float gain) {
+  int reg = 0;
+  if (gain > 0) reg = 0xBF + (int)lroundf(40.0f * log10f(gain));
+  es8156Write(0x14, (uint8_t)constrain(reg, 0, 0xFF));
+  return true;
+}
 #else
-void setVolume(uint8_t) {}  // PCM5102A has no volume control
+bool setGain(float) { return false; }  // PCM5102A has no volume control
 #endif
 
 bool begin(uint32_t sampleRate) {
@@ -69,7 +76,7 @@ bool begin(uint32_t sampleRate) {
 
   i2s_std_config_t stdCfg = {
       .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sampleRate),
-      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO),
       .gpio_cfg =
           {
               .mclk = (gpio_num_t)I2S_MCLK_PIN,
@@ -97,9 +104,9 @@ bool begin(uint32_t sampleRate) {
   return true;
 }
 
-void write(const int16_t* frames, size_t frameCount) {
+void write(const int32_t* frames, size_t frameCount) {
   size_t written = 0;
-  i2s_channel_write(s_tx, frames, frameCount * 2 * sizeof(int16_t), &written, portMAX_DELAY);
+  i2s_channel_write(s_tx, frames, frameCount * 2 * sizeof(int32_t), &written, portMAX_DELAY);
 }
 
 }  // namespace audio_out

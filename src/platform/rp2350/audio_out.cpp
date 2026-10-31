@@ -25,7 +25,7 @@ static uint32_t s_underruns;
 uint32_t underruns() { return s_underruns; }
 uint32_t bufferFrames() { return AUDIO_DMA_DESC * AUDIO_DMA_FRAMES; }
 
-void setVolume(uint8_t) {}  // PCM510x has no volume control
+bool setGain(float) { return false; }  // PCM510x has no volume control
 
 bool begin(uint32_t sampleRate) {
 #ifdef DAC_MUTE_PIN
@@ -44,21 +44,13 @@ bool begin(uint32_t sampleRate) {
   return true;
 }
 
-void AUDIO_HOT write(const int16_t* frames, size_t frameCount) {
-  constexpr size_t CHUNK = 64;
-  int32_t buf[CHUNK * 2];
-  while (frameCount) {
-    size_t n = frameCount < CHUNK ? frameCount : CHUNK;
-    for (size_t i = 0; i < n * 2; i++) buf[i] = (int32_t)frames[i] << 16;
-    const uint8_t* p = (const uint8_t*)buf;
-    size_t left = n * 2 * sizeof(int32_t);
-    while (left) {  // non-blocking write: spin until DMA frees a buffer
-      size_t w = s_i2s.write(p, left);
-      p += w;
-      left -= w;
-    }
-    frames += n * 2;
-    frameCount -= n;
+void AUDIO_HOT write(const int32_t* frames, size_t frameCount) {
+  const uint8_t* p = (const uint8_t*)frames;
+  size_t left = frameCount * 2 * sizeof(int32_t);
+  while (left) {  // non-blocking write: spin until DMA frees a buffer
+    size_t w = s_i2s.write(p, left);
+    p += w;
+    left -= w;
   }
   if (s_i2s.getUnderflow()) s_underruns++;
 }

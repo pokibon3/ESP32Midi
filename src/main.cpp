@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <string.h>
 
+#include "audio_out.h"
 #include "board.h"
 #include "display.h"
 #include "midi_in.h"
@@ -42,6 +43,16 @@ static void bootPrintf(const char* fmt, ...) {
 }
 
 static bool running;  // synth started; the UI stays idle otherwise
+
+// With a DAC volume control (ES8156) the synth keeps the default level and the
+// DAC does the attenuation, so quiet settings keep the full sample resolution.
+static void applyGain() {
+  if (audio_out::setGain(masterGain / DEFAULT_MASTER_GAIN)) {
+    synth::setMasterGain(DEFAULT_MASTER_GAIN);
+  } else {
+    synth::setMasterGain(masterGain);
+  }
+}
 
 static void printStatus() {
   const synth::Stats& st = synth::stats();
@@ -93,7 +104,7 @@ static void handleButtons() {
     case BTN_ENTER: synth::reset(); break;
     default: break;
   }
-  synth::setMasterGain(masterGain);
+  applyGain();
 }
 
 void setup() {
@@ -130,7 +141,7 @@ void setup() {
       bootPrintf("Audio init failed\n");
       display::showError("Audio error", "I2S / DAC init failed");
     } else {
-      synth::setMasterGain(masterGain);
+      applyGain();
       // Without PSRAM the built presets share the heap: keep some of it free
       if (!platform::freePsram()) {
         uint32_t heap = platform::freeHeap();

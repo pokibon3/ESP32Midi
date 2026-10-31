@@ -266,7 +266,7 @@ bool popEvent(Event& e) {
 }
 
 constexpr int SPLIT = TOTAL_VOICES / 2;
-int16_t g_out[BLOCK * 2];
+int32_t g_out[BLOCK * 2];
 
 // ---------------------------------------------------------------------------
 // Channel state
@@ -756,7 +756,7 @@ AUDIO_HOT void audioBlock() {
       x = x > 0 ? 32767.0f : -32767.0f;
       g_stats.clipped++;
     }
-    g_out[i] = (int16_t)x;
+    g_out[i] = (int32_t)(x * 65536.0f);  // 16-bit full scale -> 32-bit slot
   }
   uint32_t elapsed = micros() - t0;
 
