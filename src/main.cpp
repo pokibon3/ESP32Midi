@@ -3,8 +3,9 @@
 //  MIDI in : USB-MIDI (native USB port) / UART (MIDI_UART_RX_PIN)
 //  Audio   : BOX-Lite: ES8156 DAC -> speaker / XIAO: PCM5102A -> stereo line out
 //            RP2350: PCM5100A -> headphone amp
-//  Buttons : BOX-Lite: PREV = volume down, NEXT = volume up, ENTER = GM reset
-//            XIAO:     BOOT = GM reset (volume: GM Master Volume SysEx)
+//  Buttons : BOX-Lite: PREV = volume down, NEXT = volume up,
+//                      ENTER = panic (short press) / GM reset (hold 1 s)
+//            XIAO:     BOOT = panic / GM reset (hold 1 s) (volume: GM Master Volume SysEx)
 //            RP2350:   none (volume: GM Master Volume SysEx)
 #include <Arduino.h>
 #include <stdarg.h>
@@ -89,22 +90,37 @@ static void updateLed() {
 
 static void handleButtons() {
   static Button last = BTN_NONE;
+  static uint32_t pressedAt = 0;
   static uint32_t repeatAt = 0;
+  static bool enterLong = false;
+  constexpr uint32_t kLongPressMs = 1000;
   Button b = readButton();
   uint32_t now = millis();
-  bool pressed = b != last || (b != BTN_NONE && now >= repeatAt);
-  if (b != last) repeatAt = now + 400;
-  last = b;
-  if (!pressed || b == BTN_NONE) return;
-  if (now >= repeatAt) repeatAt = now + 80;
 
-  switch (b) {
-    case BTN_PREV: masterGain = max(0.0f, masterGain - 0.02f); break;
-    case BTN_NEXT: masterGain = min(1.0f, masterGain + 0.02f); break;
-    case BTN_ENTER: synth::reset(); break;
-    default: break;
+  if (b != last) {
+    // ENTER acts on release (panic) or after a 1 s hold (GM reset)
+    if (last == BTN_ENTER && !enterLong) synth::panic();
+    pressedAt = now;
+    repeatAt = now + 400;
+    enterLong = false;
+    last = b;
+    if (b == BTN_PREV || b == BTN_NEXT) {
+      masterGain = b == BTN_PREV ? max(0.0f, masterGain - 0.02f) : min(1.0f, masterGain + 0.02f);
+      applyGain();
+    }
+    return;
   }
-  applyGain();
+
+  if (b == BTN_ENTER) {
+    if (!enterLong && now - pressedAt >= kLongPressMs) {
+      enterLong = true;
+      synth::reset();
+    }
+  } else if ((b == BTN_PREV || b == BTN_NEXT) && now >= repeatAt) {
+    repeatAt = now + 80;
+    masterGain = b == BTN_PREV ? max(0.0f, masterGain - 0.02f) : min(1.0f, masterGain + 0.02f);
+    applyGain();
+  }
 }
 
 void setup() {

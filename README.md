@@ -25,8 +25,8 @@ ESP32-S3 / RP2350 を USB-MIDI 音源にするファームウェアです。既�
 - 入力: USB-MIDI(本体の USB-C)、UART MIDI(`MIDI_UART_RX_PIN` で有効化)
 - 画面(BOX-Lite): 16ch のプリセット名と LED 風レベルメーター、発音数・CPU 負荷バー、音量スライダー
 - 出力遅延: I2S DMA バッファ 3 × 128 フレーム(32kHz で 12ms。`AUDIO_DMA_DESC` / `AUDIO_DMA_FRAMES`)
-- ボタン(BOX-Lite): PREV = 音量−、NEXT = 音量＋、ENTER = GMリセット
-- ボタン(XIAO): BOOT = GMリセット。発音中はユーザー LED が点灯
+- ボタン(BOX-Lite): PREV = 音量−、NEXT = 音量＋、ENTER 短押し = パニック(音を止める、音色は保持)、ENTER 1秒長押し = GMリセット
+- ボタン(XIAO): BOOT 短押し = パニック、1秒長押し = GMリセット。発音中はユーザー LED が点灯
 
 ## 使い方
 

@@ -41,6 +41,8 @@ void midiMessage(uint8_t status, uint8_t d1, uint8_t d2);
 void sysex(const uint8_t* data, size_t len);
 // GM reset.
 void reset();
+// Stop all sound and reset controllers (sustain, bend, mod, expression); keeps programs.
+void panic();
 
 void setMasterGain(float gain);
 // Return levels of the reverb / chorus send effects (1.0 = default)

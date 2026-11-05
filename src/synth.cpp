@@ -543,6 +543,7 @@ void controlChange(uint8_t ch, uint8_t cc, uint8_t val) {
 }
 
 constexpr uint8_t EV_RESET = 0xFF;
+constexpr uint8_t EV_PANIC = 0xFE;
 
 void handleEvent(const Event& e) {
   if (e.status == EV_RESET) {
@@ -550,6 +551,14 @@ void handleEvent(const Event& e) {
       if (g_voices[i].active) killVoice(g_voices[i]);
     }
     for (int i = 0; i < 16; i++) resetChannel(i);
+    return;
+  }
+  if (e.status == EV_PANIC) {
+    // Silence everything but keep programs, volume, pan and effect sends
+    for (int i = 0; i < TOTAL_VOICES; i++) {
+      if (g_voices[i].active) killVoice(g_voices[i]);
+    }
+    for (int i = 0; i < 16; i++) resetControllers(g_ch[i]);
     return;
   }
   uint8_t ch = e.status & 0x0F;
@@ -804,6 +813,11 @@ void midiMessage(uint8_t status, uint8_t d1, uint8_t d2) {
 void reset() {
   if (!g_started) return;
   pushEvent(Event{EV_RESET, 0, 0});
+}
+
+void panic() {
+  if (!g_started) return;
+  pushEvent(Event{EV_PANIC, 0, 0});
 }
 
 void sysex(const uint8_t* d, size_t len) {
