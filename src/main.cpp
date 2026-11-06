@@ -203,6 +203,7 @@ void loop() {
       Serial.printf("voices %u (peak %u) cpu %d%% (block max %d%%) late %lu xrun %lu clip %lu\n", st.activeVoices,
                     st.peakVoices, (int)(st.cpuLoad * 100), (int)(st.peakLoad * 100), (unsigned long)st.lateBlocks,
                     (unsigned long)st.underruns, (unsigned long)st.clipped);
+      if (midi_in::bleConnected()) Serial.printf("ble jitter buffer %d ms\n", midi_in::bleMargin());
       synth::stats().peakLoad = 0;
     }
   }

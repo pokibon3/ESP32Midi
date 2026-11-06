@@ -73,6 +73,7 @@
   #list .song { flex: 1; text-align: left; overflow-wrap: anywhere; }
   #list .del { flex: none; width: 44px; padding: 0; color: var(--muted); }
   #empty { color: var(--muted); font-size: 14px; margin: 4px 0 0; }
+  .diag { color: var(--muted); font-size: 12px; text-align: center; margin: 0; font-variant-numeric: tabular-nums; min-height: 1.5em; }
   footer { color: var(--muted); font-size: 12px; text-align: center; }
 </style>
 </head>
@@ -126,6 +127,7 @@
     <p id="empty">.mid ファイルを追加してください。追加した曲はこのブラウザに保存されます。</p>
   </section>
 
+  <p id="diag" class="diag"></p>
   <footer>画面を閉じたり他のアプリに切り替えると再生が止まります</footer>
 </main>
 <script src="smf.js"></script>

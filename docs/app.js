@@ -11,7 +11,7 @@ const ui = {
   title: $('title'), pos: $('pos'), dur: $('dur'), seek: $('seek'),
   play: $('play'), stop: $('stop'), prev: $('prev'), next: $('next'), panic: $('panic'),
   vol: $('vol'), volVal: $('volVal'), add: $('add'), file: $('file'), list: $('list'), empty: $('empty'),
-  repeat: $('repeat'),
+  repeat: $('repeat'), diag: $('diag'),
 };
 
 // ---------------------------------------------------------------- BLE-MIDI
@@ -56,33 +56,41 @@ function setStatus(s) {
   ui.connect.textContent = s === 'connected' ? '切断' : ble.device ? '再接続' : 'BLE-MIDI に接続';
 }
 
-function send(msg) {
+// at: the intended time of the message on the performance.now() clock. It goes
+// out as the BLE-MIDI timestamp, so the synth can undo transport jitter.
+function send(msg, at = performance.now()) {
   if (!ble.chr) return;
-  ble.queue.push(msg);
+  ble.queue.push({ m: msg, at });
   pump();
 }
 
-// BLE-MIDI packet: header (10hhhhhh), then per message a timestamp byte
-// (1lllllll) and the message. SysEx goes in packets of its own: continuation
-// packets carry only the header, and the closing F7 gets a timestamp.
+const diag = { late: 0, size: 0 };
+
+// BLE-MIDI packet: header (10hhhhhh = timestamp bits 12-7), then per message
+// a timestamp byte (1lllllll = bits 6-0) and the message. Running status drops
+// the status byte, and the timestamp too when it is unchanged. Timestamps in a
+// packet must not go backwards (a smaller low part means the low bits wrapped).
+// SysEx goes in packets of its own: continuation packets carry only the
+// header, and the closing F7 gets a timestamp.
 async function pump() {
   if (ble.busy) return;
   ble.busy = true;
   try {
     while (ble.queue.length && ble.chr) {
-      const ts = Math.floor(performance.now()) & 0x1fff;
-      const hdr = 0x80 | (ts >> 7), tsb = 0x80 | (ts & 0x7f);
       const packets = [];
       let taken = 0;
-      if (ble.queue[0][0] === 0xf0) {
-        const sx = ble.queue[0];
+      const first = ble.queue[0];
+      const ts0 = Math.floor(first.at) & 0x1fff;
+      const hdr = 0x80 | (ts0 >> 7);
+      if (first.m[0] === 0xf0) {
+        const tsb = 0x80 | (ts0 & 0x7f);
+        const body = first.m.subarray(0, first.m.length - 1);  // F0 ... (without F7)
         taken = 1;
-        const body = sx.subarray(0, sx.length - 1);  // F0 ... (without F7)
-        let i = 0, first = true;
-        while (i < body.length || first) {
+        let i = 0, firstPkt = true;
+        while (i < body.length || firstPkt) {
           const pkt = [hdr];
-          if (first) pkt.push(tsb);
-          first = false;
+          if (firstPkt) pkt.push(tsb);
+          firstPkt = false;
           while (i < body.length && pkt.length < ble.maxPayload) pkt.push(body[i++]);
           if (i >= body.length && pkt.length + 2 <= ble.maxPayload) { pkt.push(tsb, 0xf7); packets.push(pkt); break; }
           packets.push(pkt);
@@ -90,17 +98,38 @@ async function pump() {
         }
       } else {
         const pkt = [hdr];
+        let hi = ts0 >> 7, lastLow = -1, running = 0;
         while (taken < ble.queue.length) {
-          const m = ble.queue[taken];
-          if (m[0] === 0xf0 || pkt.length + 1 + m.length > ble.maxPayload) break;
-          pkt.push(tsb, ...m);
+          const { m, at } = ble.queue[taken];
+          if (m[0] === 0xf0) break;
+          const ts = Math.floor(at) & 0x1fff, h = ts >> 7, low = ts & 0x7f;
+          let wrap = false;
+          if (h !== hi) {
+            if (h !== ((hi + 1) & 0x3f) || lastLow < 0 || low >= lastLow) break;
+            wrap = true;
+          } else if (low < lastLow) {
+            break;  // earlier than the previous message: next packet
+          }
+          let status = m[0], data = m.subarray(1);
+          if ((status & 0xf0) === 0x80) { status = 0x90 | (status & 0x0f); data = new Uint8Array([m[1], 0]); }
+          const bytes = status === running
+            ? (low === lastLow ? [...data] : [0x80 | low, ...data])
+            : [0x80 | low, status, ...data];
+          if (pkt.length + bytes.length > ble.maxPayload) break;
+          pkt.push(...bytes);
+          if (wrap) hi = h;
+          running = status;
+          lastLow = low;
           taken++;
         }
         packets.push(pkt);
       }
       try {
+        const late = performance.now() - first.at;
         for (const pkt of packets) await write(new Uint8Array(pkt));
         ble.queue.splice(0, taken);
+        diag.late = Math.max(diag.late, late);
+        diag.size = Math.max(diag.size, ...packets.map((p) => p.length));
       } catch (e) {
         if (ble.maxPayload > 20) { ble.maxPayload = 20; continue; }  // retry with small packets
         console.warn('BLE write failed', e);
@@ -118,7 +147,7 @@ function write(bytes) {
 }
 
 function panic() {
-  ble.queue.length = 0;
+  ble.queue.length = 0;  // drop what is still waiting
   for (let ch = 0; ch < 16; ch++) {
     send(new Uint8Array([0xb0 | ch, 64, 0]));
     send(new Uint8Array([0xb0 | ch, 123, 0]));
@@ -155,7 +184,10 @@ function songTime() {
 function tick() {
   const now = songTime();
   const ev = player.song.events;
-  while (player.next < ev.length && ev[player.next].t <= now) send(ev[player.next++].data);
+  while (player.next < ev.length && ev[player.next].t <= now) {
+    const e = ev[player.next++];
+    send(e.data, player.startAt + e.t);
+  }
   if (player.next >= ev.length && now >= player.song.duration + 500) {
     finish();
     return;
@@ -376,6 +408,13 @@ ui.vol.oninput = () => {
   try { localStorage.setItem('vol', ui.vol.value); } catch (_) {}
   sendVolume();
 };
+setInterval(() => {
+  if (!ble.chr) { ui.diag.textContent = ''; return; }
+  ui.diag.textContent = `送信の遅れ 最大 ${Math.round(diag.late)} ms ・ パケット 最大 ${diag.size} B (上限 ${ble.maxPayload} B) ・ 待ち ${ble.queue.length}`;
+  diag.late = 0;
+  diag.size = 0;
+}, 1000);
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && player.playing) keepAwake(true);
 });

@@ -18,5 +18,7 @@ void poll();
 // BLE-MIDI built in / a central is connected
 bool bleEnabled();
 bool bleConnected();
+// Current BLE-MIDI jitter buffer delay (ms)
+int bleMargin();
 
 }  // namespace midi_in
