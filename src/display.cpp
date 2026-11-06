@@ -1,4 +1,5 @@
 #include "display.h"
+#include "midi_in.h"
 
 #include "board.h"
 
@@ -197,7 +198,7 @@ void showHeader(const char* sfName, uint32_t presets, uint32_t regions) {
   lcd.setFont(&fonts::Font2);
   lcd.setTextColor(TFT_WHITE);
   lcd.setCursor(6, 6);
-  lcd.print("GM SYNTH");
+  lcd.print("ESP32 MIDI Box");
   lcd.setFont(&fonts::Font0);
   lcd.setTextDatum(textdatum_t::top_right);
   lcd.setTextColor(rgb(150, 230, 255));
@@ -255,6 +256,16 @@ void update(float masterGain) {
   lcd.setTextColor(TFT_YELLOW, COL_BG);
   lcd.setCursor(216, STATUS_Y + 13);
   lcd.printf("%3u", st.peakVoices);
+
+  // BLE-MIDI: blue when a central is connected, grey while advertising
+  static int drawnBle = -1;
+  int ble = midi_in::bleEnabled() ? (midi_in::bleConnected() ? 2 : 1) : 0;
+  if (ble != drawnBle) {
+    drawnBle = ble;
+    lcd.setTextColor(ble == 2 ? rgb(80, 160, 255) : rgb(90, 90, 90), COL_BG);
+    lcd.setCursor(262, STATUS_Y + 13);
+    lcd.print(ble ? "BLE" : "   ");
+  }
 
   // ---- channels
   for (int c = 0; c < 16; c++) {

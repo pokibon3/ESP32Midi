@@ -22,7 +22,8 @@ ESP32-S3 / RP2350 を USB-MIDI 音源にするファームウェアです。既�
 - MIDI: Note On/Off、Program Change、Bank Select、Pitch Bend(RPN 0 でレンジ変更可)、
   CC1/7/10/11/64/91/93/120/121/123、GM/GS/XG リセット SysEx、GM マスターボリューム SysEx。
   10ch はドラム(bank 128)
-- 入力: USB-MIDI(本体の USB-C)、UART MIDI(`MIDI_UART_RX_PIN` で有効化)
+- 入力: USB-MIDI(本体の USB-C)、UART MIDI(`MIDI_UART_RX_PIN` で有効化)、
+  BLE-MIDI(ESP32-S3 の `-ble` 環境。下記)
 - 画面(BOX-Lite): 16ch のプリセット名と LED 風レベルメーター、発音数・CPU 負荷バー、音量スライダー
 - 出力遅延: I2S DMA バッファ 3 × 128 フレーム(32kHz で 12ms。`AUDIO_DMA_DESC` / `AUDIO_DMA_FRAMES`)
 - ボタン(BOX-Lite): PREV = 音量−、NEXT = 音量＋、ENTER 短押し = パニック(音を止める、音色は保持)、ENTER 1秒長押し = GMリセット
@@ -147,6 +148,21 @@ PlatformIO Core 6.2.0 以上が必要です(PlatformIO IDE 同梱の `~/.platfor
 - シリアルモニタを開くと起動ログと状態(`status: blocks …`)を表示する。
   診断用に `-DDIAG_LED` を付けると、青 LED でメインループの停止位置を表示する
 
+## BLE-MIDI (ESP32-S3)
+
+`esp32s3box-lite-ble` / `xiao-pcm5102-ble` 環境は USB-MIDI / UART に加えて BLE-MIDI
+ペリフェラル「ESP32 MIDI Box」として受信します(ファームウェアは約 300KB 増)。
+
+```sh
+pio run -e esp32s3box-lite-ble -t upload
+```
+
+macOS では「Audio MIDI 設定」→ ウインドウ → MIDI スタジオを表示 → Bluetooth を構成 で
+「ESP32 MIDI Box」に接続します。出力先名は「ESP32 MIDI Box Bluetooth」になるので
+`midiplay -d Bluetooth song.mid` で再生できます。BOX-Lite の画面右下の「BLE」は接続中に青、
+待ち受け中に灰色になります。BLE の接続間隔(7.5〜15ms)ぶん USB より遅延と揺れが増えます。
+BOX-Lite でオーケストラのデモ(最大 133 音)を BLE で流して、音切れや遅れは感じられませんでした。
+
 ## MIDI ファイルの再生 (macOS)
 
 GarageBand は外部 MIDI 出力を持たないので、曲は「ファイル → 書き出す → MIDI ファイル」で
@@ -224,7 +240,7 @@ BOX-Lite で `tools/demo/orchestra.mid`(常に 128 音)を再生したときは�
 | `src/audio_out.h` | I2S 出力のインターフェイス |
 | `src/platform/esp32/` | ESP32-S3 実装(FreeRTOS タスク、パーティション mmap、I2S + ES8156 / PCM5102A) |
 | `src/platform/rp2350/` | RP2350 実装(コア 1 = オーディオ、XIP 上の SF2、PIO I2S + PCM5100A) |
-| `src/midi_in.*` | USB-MIDI / UART MIDI の受信とパース |
+| `src/midi_in.*` | USB-MIDI / UART MIDI / BLE-MIDI の受信とパース |
 | `src/display.*` | LovyanGFX による状態表示(画面のないボードでは空の実装) |
 | `scripts/upload_sf2.py` | `uploadsf2` ターゲット |
 | `tools/sf2shrink.py` | SoundFont をフラッシュに収まるよう縮める変換スクリプト |
