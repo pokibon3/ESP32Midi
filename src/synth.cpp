@@ -551,6 +551,7 @@ void handleEvent(const Event& e) {
       if (g_voices[i].active) killVoice(g_voices[i]);
     }
     for (int i = 0; i < 16; i++) resetChannel(i);
+    g_stats.peakVoices = 0;  // the screen's PEAK restarts with each GM reset
     return;
   }
   if (e.status == EV_PANIC) {

@@ -159,7 +159,8 @@ pio run -e esp32s3box-lite-ble -t upload
 
 macOS では「Audio MIDI 設定」→ ウインドウ → MIDI スタジオを表示 → Bluetooth を構成 で
 「ESP32 MIDI Box」に接続します。出力先名は「ESP32 MIDI Box Bluetooth」になるので
-`midiplay -d Bluetooth song.mid` で再生できます。BOX-Lite の画面右下の「BLE」は接続中に青、
+`midiplay -d Bluetooth song.mid` で再生できます。出力先が見つからないとき `midiplay` は
+ペアリング済みの Bluetooth MIDI 機器の再接続を要求して 10 秒待ちます(効果は未確認)。BOX-Lite の画面右下の「BLE」は接続中に青、
 待ち受け中に灰色になります。BLE の接続間隔(7.5〜15ms)ぶん USB より遅延と揺れが増えます。
 BOX-Lite でオーケストラのデモ(最大 133 音)を BLE で流して、音切れや遅れは感じられませんでした。
 

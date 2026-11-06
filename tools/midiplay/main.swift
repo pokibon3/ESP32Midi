@@ -3,6 +3,9 @@
 //   midiplay song.mid             play to the first destination whose name contains "ESP32"
 //   midiplay -d "IAC" song.mid    choose the destination by (partial) name
 //   midiplay -l                   list destinations
+//
+// When no destination matches, previously paired Bluetooth MIDI devices are
+// reconnected (the Mac does not always do it after the synth restarts).
 import AudioToolbox
 import CoreMIDI
 import Foundation
@@ -28,10 +31,6 @@ func check(_ status: OSStatus, _ what: String) {
 // ---- arguments
 var args = Array(CommandLine.arguments.dropFirst())
 var destQuery = "ESP32"
-if args.first == "-l" {
-  for d in destinations() { print(d.name) }
-  exit(0)
-}
 if args.count >= 2 && args[0] == "-d" {
   destQuery = args[1]
   args.removeFirst(2)
@@ -39,7 +38,33 @@ if args.count >= 2 && args[0] == "-d" {
 guard args.count == 1 else { fail("usage: midiplay [-l] [-d destination] file.mid") }
 let path = args[0]
 
-guard let dest = destinations().first(where: { $0.name.localizedCaseInsensitiveContains(destQuery) }) else {
+func findDestination() -> (name: String, endpoint: MIDIEndpointRef)? {
+  destinations().first(where: { $0.name.localizedCaseInsensitiveContains(destQuery) })
+}
+
+// Reconnects paired Bluetooth MIDI devices and waits for the destination
+func reconnectBluetooth(timeout: TimeInterval) -> (name: String, endpoint: MIDIEndpointRef)? {
+  var probe = MIDIClientRef()
+  MIDIClientCreate("midiplay-probe" as CFString, nil, nil, &probe)  // to receive setup changes
+  FileHandle.standardError.write("reconnecting Bluetooth MIDI...\n".data(using: .utf8)!)
+  MIDIBluetoothDriverActivateAllConnections()
+  let end = Date().addingTimeInterval(timeout)
+  while Date() < end {
+    CFRunLoopRunInMode(.defaultMode, 0.25, false)
+    if let d = findDestination() { return d }
+  }
+  return nil
+}
+
+var listOnly = false
+if args.first == "-l" { listOnly = true }
+if listOnly {
+  if destinations().isEmpty { _ = reconnectBluetooth(timeout: 10) }
+  for d in destinations() { print(d.name) }
+  exit(0)
+}
+
+guard let dest = findDestination() ?? reconnectBluetooth(timeout: 10) else {
   fail("MIDI destination containing \"\(destQuery)\" not found (midiplay -l to list)")
 }
 
